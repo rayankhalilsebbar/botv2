@@ -3,7 +3,7 @@ module.exports = {
   // Paramètres de trading
   symbol: 'BTCUSDT',
   maxOrders: 100,           // Nombre maximum d'ordres actifs
-  priceStep: 10,            // Écart entre les paliers en USD
+  priceStep: 100,            // Écart entre les paliers en USD
   orderAmountUSDT: 2,      // Montant fixe en USDT pour chaque ordre
   pricePrecision: 2,        // Nombre de décimales pour les prix
   sizePrecision: 6,         // Nombre de décimales pour la taille des ordres
