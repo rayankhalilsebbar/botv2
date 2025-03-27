@@ -247,8 +247,81 @@ class GridStrategy {
     // Nombre d'emplacements disponibles
     const availableSlots = this.config.maxOrders - totalActiveOrders;
     
+    // Trier les nouveaux prix à ajouter par proximité avec le prix actuel
+    const currentPrice = this.wsClient.getCurrentPrice();
+    newPricesToAdd.sort((a, b) => Math.abs(currentPrice - a) - Math.abs(currentPrice - b));
+    
     // Limiter le nombre de nouveaux prix à ajouter
     const pricesToAdd = availableSlots > 0 ? newPricesToAdd.slice(0, availableSlots) : [];
+    
+    // NOUVELLE LOGIQUE: Détecter les trous dans la grille après les opérations standard
+    if (pricesToAdd.length < newPricesToAdd.length && activeBuyOrders.length > 0) {
+      // Il reste des prix qu'on voudrait ajouter mais pas assez d'emplacements
+      // Chercher s'il y a des trous proches qui devraient être priorisés
+      
+      // Calculer la distance de chaque prix restant par rapport au prix actuel
+      const remainingPrices = newPricesToAdd.slice(pricesToAdd.length).map(price => ({
+        price,
+        distanceFromCurrent: Math.abs(currentPrice - price)
+      }));
+      
+      // Trier les prix restants du plus proche au plus éloigné
+      remainingPrices.sort((a, b) => a.distanceFromCurrent - b.distanceFromCurrent);
+      
+      // Calculer la distance de chaque ordre actif par rapport au prix actuel
+      // Exclure les ordres déjà prévus pour annulation
+      const ordersToKeep = activeBuyOrders.filter(
+        order => !ordersToCancel.includes(order.clientOid)
+      );
+      
+      const existingOrdersWithDistance = ordersToKeep.map(order => ({
+        order,
+        distanceFromCurrent: Math.abs(currentPrice - order.price)
+      }));
+      
+      // Trier du plus éloigné au plus proche
+      existingOrdersWithDistance.sort((a, b) => b.distanceFromCurrent - a.distanceFromCurrent);
+      
+      // Ordres supplémentaires à annuler pour libérer de l'espace pour les trous proches
+      const additionalOrdersToCancel = [];
+      const additionalPricesToAdd = [];
+      
+      // Chercher les trous proches qui méritent de remplacer des ordres éloignés
+      for (const holeInfo of remainingPrices) {
+        // Chercher l'ordre le plus éloigné qui n'est pas encore marqué pour annulation
+        if (existingOrdersWithDistance.length === 0) break;
+        
+        const farOrderInfo = existingOrdersWithDistance[0];
+        
+        // Vérifier si cet ordre est significativement plus éloigné que le trou
+        if (farOrderInfo.distanceFromCurrent > holeInfo.distanceFromCurrent * 1.5) {
+          // Cet ordre est au moins 50% plus éloigné que le trou, l'annuler
+          additionalOrdersToCancel.push(farOrderInfo.order.clientOid);
+          additionalPricesToAdd.push(holeInfo.price);
+          
+          console.log(`🔄 Optimisation: Annulation de l'ordre éloigné à ${farOrderInfo.order.price}$ (distance: ${farOrderInfo.distanceFromCurrent.toFixed(2)}) pour combler le trou à ${holeInfo.price}$ (distance: ${holeInfo.distanceFromCurrent.toFixed(2)})`);
+          
+          // Retirer cet ordre de la liste pour ne pas le réutiliser
+          existingOrdersWithDistance.shift();
+        } else {
+          // Si l'ordre le plus éloigné n'est pas significativement plus loin que le trou,
+          // passer au trou suivant qui est probablement encore plus loin
+          break;
+        }
+      }
+      
+      // Annuler ces ordres supplémentaires si nécessaire
+      if (additionalOrdersToCancel.length > 0) {
+        console.log(`🔄 Réorganisation de la grille: Annulation de ${additionalOrdersToCancel.length} ordres éloignés pour combler des trous proches`);
+        this.orderService.cancelBulkOrders(additionalOrdersToCancel);
+        
+        // Ajouter ces niveaux à la liste des prix à ajouter
+        pricesToAdd.push(...additionalPricesToAdd);
+        
+        // Tri final par proximité
+        pricesToAdd.sort((a, b) => Math.abs(currentPrice - a) - Math.abs(currentPrice - b));
+      }
+    }
     
     // 7. Ajouter les nouveaux ordres
     if (pricesToAdd.length > 0) {
