@@ -7,6 +7,7 @@ class GridStrategy {
     
     this.running = false;
     this.updateInterval = null;
+    this.isUpdating = false;  // Nouveau verrou
     this.lastProcessedPrice = null;
     this.lastGridUpdateTime = null;
     this.lastBasePrice = null;
@@ -67,6 +68,150 @@ class GridStrategy {
     this.lastProcessedPrice = currentPrice;
   }
   
+  // Nouvelle méthode updateGrid unifiée
+  updateGrid() {
+    if (!this.running) return;
+    if (this.isUpdating) return;  // Protection contre les exécutions simultanées
+    
+    this.isUpdating = true;
+    
+    try {
+      const currentPrice = this.wsClient.getCurrentPrice();
+      if (!currentPrice) {
+        console.log('⚠️ Impossible de mettre à jour la grille: prix actuel non disponible');
+        return;
+      }
+  
+      // 1. Calculer le prix de base actuel
+      const currentBasePrice = Math.floor(currentPrice / this.config.priceStep) * this.config.priceStep;
+  
+      // 2. Ajuster la grille vers le haut si nécessaire
+      if (this.lastBasePrice && currentBasePrice > this.lastBasePrice) {
+        console.log(`📈 Le prix est monté - Prix actuel: ${currentPrice}$ (base: ${currentBasePrice}$ > dernière base: ${this.lastBasePrice}$)`);
+        
+        // Obtenir les ordres actifs
+        const activeBuyOrders = this.orderService.getActiveBuyOrders();
+        
+        // Générer la nouvelle grille idéale
+        const newGrid = this.generateGrid(currentPrice);
+        
+        // Identifier les ordres à annuler (trop bas)
+        const ordersToCancel = [];
+        const existingPrices = new Set();
+        
+        for (const order of activeBuyOrders) {
+          existingPrices.add(order.price);
+          if (!newGrid.includes(order.price)) {
+            ordersToCancel.push(order.clientOid);
+          }
+        }
+  
+        // Identifier les nouveaux prix à ajouter avec vérification des ordres de vente
+        const newPricesToAdd = newGrid.filter(price => {
+          // Vérifie qu'il n'y a pas déjà un ordre d'achat à ce prix
+          if (existingPrices.has(price)) {
+            return false;
+          }
+          
+          // Vérifie qu'il n'y a pas d'ordre de vente au niveau supérieur
+          const sellPriceLevel = parseFloat((price + this.config.priceStep).toFixed(this.config.pricePrecision));
+          if (this.orderService.hasSellOrderAtPrice(sellPriceLevel)) {
+            return false;
+          }
+          
+          return true;
+        });
+        
+        // Appliquer les changements
+        if (ordersToCancel.length > 0) {
+          console.log(`❌ Annulation de ${ordersToCancel.length} ordres trop éloignés de la nouvelle grille`);
+          this.orderService.cancelBulkOrders(ordersToCancel);
+        }
+  
+        if (newPricesToAdd.length > 0) {
+          console.log(`📈 Ajout de ${newPricesToAdd.length} nouveaux niveaux de prix à la grille`);
+          const newOrdersData = newPricesToAdd.map(price => ({
+            price,
+            size: this.orderService.calculateOrderSize(price)
+          }));
+          this.orderService.placeBulkOrders(newOrdersData, 'buy');
+        }
+  
+        this.lastBasePrice = currentBasePrice;
+      }
+  
+      // 3. Combler les trous dans la grille existante
+      const activeBuyOrders = this.orderService.getActiveBuyOrders();
+      const idealGrid = this.generateGrid(currentPrice);
+      
+      // Identifier les trous avec vérification des ordres de vente
+      const existingPrices = new Set(activeBuyOrders.map(order => order.price));
+      const holes = idealGrid
+        .filter(price => {
+          // Vérifie qu'il n'y a pas déjà un ordre d'achat à ce prix
+          if (existingPrices.has(price)) {
+            return false;
+          }
+          
+          // Vérifie qu'il n'y a pas d'ordre de vente au niveau supérieur
+          const sellPriceLevel = parseFloat((price + this.config.priceStep).toFixed(this.config.pricePrecision));
+          if (this.orderService.hasSellOrderAtPrice(sellPriceLevel)) {
+            return false;
+          }
+          
+          return true;
+        })
+        .map(price => ({
+          price,
+          distanceFromCurrent: Math.abs(currentPrice - price)
+        }))
+        .sort((a, b) => a.distanceFromCurrent - b.distanceFromCurrent);
+  
+      // Identifier les ordres déplaçables
+      const movableOrders = activeBuyOrders
+        .map(order => ({
+          order,
+          distanceFromCurrent: Math.abs(currentPrice - order.price)
+        }))
+        .sort((a, b) => b.distanceFromCurrent - a.distanceFromCurrent);
+  
+      // Combler les trous
+      const holeOrdersToCancel = [];
+      const newHoleOrdersToPlace = [];
+      
+      for (const hole of holes) {
+        if (movableOrders.length === 0) break;
+        
+        const farOrder = movableOrders[0];
+        if (farOrder.distanceFromCurrent > hole.distanceFromCurrent) {
+          holeOrdersToCancel.push(farOrder.order.clientOid);
+          newHoleOrdersToPlace.push(hole.price);
+          movableOrders.shift();
+        }
+      }
+  
+      // Appliquer les changements pour les trous
+      if (holeOrdersToCancel.length > 0) {
+        console.log(`🔄 Optimisation: Déplacement de ${holeOrdersToCancel.length} ordres pour combler les trous`);
+        this.orderService.cancelBulkOrders(holeOrdersToCancel);
+        
+        const newOrdersData = newHoleOrdersToPlace.map(price => ({
+          price,
+          size: this.orderService.calculateOrderSize(price)
+        }));
+        
+        this.orderService.placeBulkOrders(newOrdersData, 'buy');
+      }
+  
+      // Mettre à jour les timestamps
+      this.lastGridUpdateTime = Date.now();
+      this.lastProcessedPrice = currentPrice;
+  
+    } finally {
+      this.isUpdating = false;
+    }
+  }
+  
   // Démarrer la stratégie
   start() {
     if (this.running) return;
@@ -74,7 +219,6 @@ class GridStrategy {
     
     console.log('🚀 Démarrage de la stratégie de grid trading');
     
-    // Vérifier si nous avons un prix valide
     const currentPrice = this.wsClient.getCurrentPrice();
     if (!currentPrice) {
       console.error('❌ Impossible de démarrer la stratégie: prix actuel non disponible');
@@ -85,11 +229,10 @@ class GridStrategy {
     // Générer et placer la grille initiale
     this.initialGridPlacement(currentPrice);
     
-    // Configurer l'intervalle de mise à jour
-    const updateInterval = this.config.strategy.updateInterval || 5000;
-    this.updateInterval = setInterval(() => this.updateGrid(), updateInterval);
+    // Configurer l'intervalle unique de mise à jour
+    this.updateInterval = setInterval(() => this.updateGrid(), 1000);
     
-    console.log(`⏱️ Grille configurée pour mise à jour toutes les ${updateInterval / 1000} secondes`);
+    console.log(`⏱️ Grille configurée pour mise à jour toutes les secondes`);
   }
   
   // Arrêter la stratégie
@@ -149,47 +292,6 @@ class GridStrategy {
     }
     
     return grid;
-  }
-  
-  // Mise à jour périodique de la grille
-  updateGrid() {
-    if (!this.running) return;
-    
-    const currentPrice = this.wsClient.getCurrentPrice();
-    if (!currentPrice) {
-      console.log('⚠️ Impossible de mettre à jour la grille: prix actuel non disponible');
-      return;
-    }
-    
-    // Éviter les mises à jour trop fréquentes pour le même prix
-    if (this.lastGridUpdateTime && 
-        Date.now() - this.lastGridUpdateTime < 1000 && 
-        this.lastProcessedPrice === currentPrice) {
-      return;
-    }
-    
-    // Calculer le prix de base actuel
-    const currentBasePrice = Math.floor(currentPrice / this.config.priceStep) * this.config.priceStep;
-    
-    // Si le prix a baissé ou est resté stable, on ne fait rien
-    if (this.lastBasePrice && currentBasePrice <= this.lastBasePrice) {
-      // Mise à jour silencieuse (log uniquement si déboggage activé)
-      // console.log(`💤 Prix actuel: ${currentPrice}$ (base: ${currentBasePrice}$) <= dernière base: ${this.lastBasePrice}$ - Pas d'ajustement`);
-      return;
-    }
-    
-    // Le prix a monté, on ajuste la grille vers le haut
-    console.log(`📈 Le prix est monté - Prix actuel: ${currentPrice}$ (base: ${currentBasePrice}$ > dernière base: ${this.lastBasePrice}$)`);
-    
-    // Ajuster la grille vers le haut
-    this.adjustGridUpwards(currentBasePrice);
-    
-    // Mémoriser le nouveau prix de base
-    this.lastBasePrice = currentBasePrice;
-    
-    // Mettre à jour l'horodatage de la dernière mise à jour
-    this.lastGridUpdateTime = Date.now();
-    this.lastProcessedPrice = currentPrice;
   }
   
   // Nouvelle méthode pour l'ajustement vers le haut uniquement
@@ -253,75 +355,6 @@ class GridStrategy {
     
     // Limiter le nombre de nouveaux prix à ajouter
     const pricesToAdd = availableSlots > 0 ? newPricesToAdd.slice(0, availableSlots) : [];
-    
-    // NOUVELLE LOGIQUE: Détecter les trous dans la grille après les opérations standard
-    if (pricesToAdd.length < newPricesToAdd.length && activeBuyOrders.length > 0) {
-      // Il reste des prix qu'on voudrait ajouter mais pas assez d'emplacements
-      // Chercher s'il y a des trous proches qui devraient être priorisés
-      
-      // Calculer la distance de chaque prix restant par rapport au prix actuel
-      const remainingPrices = newPricesToAdd.slice(pricesToAdd.length).map(price => ({
-        price,
-        distanceFromCurrent: Math.abs(currentPrice - price)
-      }));
-      
-      // Trier les prix restants du plus proche au plus éloigné
-      remainingPrices.sort((a, b) => a.distanceFromCurrent - b.distanceFromCurrent);
-      
-      // Calculer la distance de chaque ordre actif par rapport au prix actuel
-      // Exclure les ordres déjà prévus pour annulation
-      const ordersToKeep = activeBuyOrders.filter(
-        order => !ordersToCancel.includes(order.clientOid)
-      );
-      
-      const existingOrdersWithDistance = ordersToKeep.map(order => ({
-        order,
-        distanceFromCurrent: Math.abs(currentPrice - order.price)
-      }));
-      
-      // Trier du plus éloigné au plus proche
-      existingOrdersWithDistance.sort((a, b) => b.distanceFromCurrent - a.distanceFromCurrent);
-      
-      // Ordres supplémentaires à annuler pour libérer de l'espace pour les trous proches
-      const additionalOrdersToCancel = [];
-      const additionalPricesToAdd = [];
-      
-      // Chercher les trous proches qui méritent de remplacer des ordres éloignés
-      for (const holeInfo of remainingPrices) {
-        // Chercher l'ordre le plus éloigné qui n'est pas encore marqué pour annulation
-        if (existingOrdersWithDistance.length === 0) break;
-        
-        const farOrderInfo = existingOrdersWithDistance[0];
-        
-        // Vérifier si cet ordre est significativement plus éloigné que le trou
-        if (farOrderInfo.distanceFromCurrent > holeInfo.distanceFromCurrent * 1.5) {
-          // Cet ordre est au moins 50% plus éloigné que le trou, l'annuler
-          additionalOrdersToCancel.push(farOrderInfo.order.clientOid);
-          additionalPricesToAdd.push(holeInfo.price);
-          
-          console.log(`🔄 Optimisation: Annulation de l'ordre éloigné à ${farOrderInfo.order.price}$ (distance: ${farOrderInfo.distanceFromCurrent.toFixed(2)}) pour combler le trou à ${holeInfo.price}$ (distance: ${holeInfo.distanceFromCurrent.toFixed(2)})`);
-          
-          // Retirer cet ordre de la liste pour ne pas le réutiliser
-          existingOrdersWithDistance.shift();
-        } else {
-          // Si l'ordre le plus éloigné n'est pas significativement plus loin que le trou,
-          // passer au trou suivant qui est probablement encore plus loin
-          break;
-        }
-      }
-      
-      // Annuler ces ordres supplémentaires si nécessaire
-      if (additionalOrdersToCancel.length > 0) {
-        console.log(`🔄 Réorganisation de la grille: Annulation de ${additionalOrdersToCancel.length} ordres éloignés pour combler des trous proches`);
-        this.orderService.cancelBulkOrders(additionalOrdersToCancel);
-        
-        // Ajouter ces niveaux à la liste des prix à ajouter
-        pricesToAdd.push(...additionalPricesToAdd);
-        
-        // Tri final par proximité
-        pricesToAdd.sort((a, b) => Math.abs(currentPrice - a) - Math.abs(currentPrice - b));
-      }
-    }
     
     // 7. Ajouter les nouveaux ordres
     if (pricesToAdd.length > 0) {
