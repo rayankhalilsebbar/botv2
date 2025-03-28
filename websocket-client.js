@@ -26,6 +26,13 @@ class WebSocketClient extends EventEmitter {
     // Intervalles pour les pings
     this.publicPingInterval = null;
     this.privatePingInterval = null;
+
+    // Paramètres de reconnexion
+    this.publicReconnectAttempts = 0;
+    this.privateReconnectAttempts = 0;
+    this.maxReconnectAttempts = 5;
+    this.publicScheduledReconnect = null;
+    this.privateScheduledReconnect = null;
   }
   
   async connect() {
@@ -54,12 +61,16 @@ class WebSocketClient extends EventEmitter {
       this.publicWs.on('open', () => {
         console.log('✅ WebSocket public connecté');
         this.publicConnected = true;
+        this.publicReconnectAttempts = 0;  // Réinitialiser les tentatives
         
         // S'abonner au canal ticker
         this.subscribeToPriceUpdates();
         
         // Configurer le ping/pong
         this.setupPublicPingPong();
+        
+        // Programmer une reconnexion
+        this.schedulePublicReconnect();
         
         resolve();
       });
@@ -96,8 +107,8 @@ class WebSocketClient extends EventEmitter {
         reject(error);
       });
       
-      this.publicWs.on('close', () => {
-        console.warn(`⚠️ WebSocket public déconnecté`);
+      this.publicWs.on('close', (code, reason) => {
+        console.warn(`⚠️ WebSocket public déconnecté: Code=${code}, Raison=${reason || 'Non spécifiée'}`);
         this.publicConnected = false;
         
         // Nettoyer les intervalles
@@ -105,6 +116,14 @@ class WebSocketClient extends EventEmitter {
           clearInterval(this.publicPingInterval);
           this.publicPingInterval = null;
         }
+        
+        if (this.publicScheduledReconnect) {
+          clearTimeout(this.publicScheduledReconnect);
+          this.publicScheduledReconnect = null;
+        }
+        
+        // Tenter de se reconnecter
+        this.reconnectPublic();
       });
     });
   }
@@ -118,12 +137,16 @@ class WebSocketClient extends EventEmitter {
       this.privateWs.on('open', () => {
         console.log('✅ WebSocket privé connecté');
         this.privateConnected = true;
+        this.privateReconnectAttempts = 0;  // Réinitialiser les tentatives
         
         // S'authentifier
         this.authenticate();
         
         // Configurer le ping/pong
         this.setupPrivatePingPong();
+        
+        // Programmer une reconnexion
+        this.schedulePrivateReconnect();
         
         resolve();
       });
@@ -152,32 +175,29 @@ class WebSocketClient extends EventEmitter {
           // Traiter les mises à jour d'ordres
           if (data.arg && data.arg.channel === 'orders' && data.data && data.data.length > 0) {
             data.data.forEach(order => {
-              const { clientOid, status, price, newSize, side } = order;
+              const { clientOid, status, price, size, side } = order;
               
               if (!clientOid) {
                 console.log('📋 Ordre sans clientOid reçu:', order);
                 return;
               }
               
-              console.log(`📋 Mise à jour d'ordre: ${clientOid}, Statut: ${status}`);
+              console.log(`📋 Mise à jour d'ordre reçue: ${clientOid}, Statut: ${status}`);
               
               // Traiter différents types de statuts
               if (status === 'filled') {
-                // Toujours utiliser newSize pour les ordres exécutés
-                const size = parseFloat(newSize);
-                
                 // Déterminer s'il s'agit d'un achat ou d'une vente
                 if (clientOid.startsWith('buy_')) {
                   this.emit('buy_order_filled', {
                     clientOid,
                     price: parseFloat(price),
-                    size: size
+                    size: parseFloat(size)
                   });
                 } else if (clientOid.startsWith('sell_')) {
                   this.emit('sell_order_filled', {
                     clientOid,
                     price: parseFloat(price),
-                    size: size
+                    size: parseFloat(size)
                   });
                 }
               } else if (status === 'cancelled' || status === 'canceled') {
@@ -204,8 +224,8 @@ class WebSocketClient extends EventEmitter {
         reject(error);
       });
       
-      this.privateWs.on('close', () => {
-        console.warn(`⚠️ WebSocket privé déconnecté`);
+      this.privateWs.on('close', (code, reason) => {
+        console.warn(`⚠️ WebSocket privé déconnecté: Code=${code}, Raison=${reason || 'Non spécifiée'}`);
         this.privateConnected = false;
         this.isAuthenticated = false;
         
@@ -214,6 +234,14 @@ class WebSocketClient extends EventEmitter {
           clearInterval(this.privatePingInterval);
           this.privatePingInterval = null;
         }
+        
+        if (this.privateScheduledReconnect) {
+          clearTimeout(this.privateScheduledReconnect);
+          this.privateScheduledReconnect = null;
+        }
+        
+        // Tenter de se reconnecter
+        this.reconnectPrivate();
       });
     });
   }
@@ -380,6 +408,17 @@ class WebSocketClient extends EventEmitter {
   disconnect() {
     console.log('🛑 Déconnexion des WebSockets');
     
+    // Arrêter les reconnexions programmées
+    if (this.publicScheduledReconnect) {
+      clearTimeout(this.publicScheduledReconnect);
+      this.publicScheduledReconnect = null;
+    }
+    
+    if (this.privateScheduledReconnect) {
+      clearTimeout(this.privateScheduledReconnect);
+      this.privateScheduledReconnect = null;
+    }
+    
     // Arrêter le traitement par lots
     if (this.batchInterval) {
       clearInterval(this.batchInterval);
@@ -413,6 +452,78 @@ class WebSocketClient extends EventEmitter {
     this.isAuthenticated = false;
     
     console.log('👋 WebSockets déconnectés proprement');
+  }
+  
+  schedulePublicReconnect() {
+    this.publicScheduledReconnect = setTimeout(() => {
+      console.log('⏰ Reconnexion programmée du WebSocket public déclenchée');
+      this.reconnectPublic(true);
+    }, this.config.reconnectInterval || 23 * 60 * 60 * 1000 + 50 * 60 * 1000); // 23h50m par défaut
+  }
+  
+  schedulePrivateReconnect() {
+    this.privateScheduledReconnect = setTimeout(() => {
+      console.log('⏰ Reconnexion programmée du WebSocket privé déclenchée');
+      this.reconnectPrivate(true);
+    }, this.config.reconnectInterval || 23 * 60 * 60 * 1000 + 50 * 60 * 1000); // 23h50m par défaut
+  }
+  
+  reconnectPublic(scheduled = false) {
+    if (scheduled) {
+      this.publicReconnectAttempts = 0;
+    }
+    
+    if (this.publicReconnectAttempts < this.maxReconnectAttempts) {
+      this.publicReconnectAttempts++;
+      const delay = Math.min(1000 * Math.pow(2, this.publicReconnectAttempts), 30000);
+      
+      console.log(`🔄 Tentative de reconnexion du WebSocket public ${this.publicReconnectAttempts}/${this.maxReconnectAttempts} dans ${delay}ms`);
+      
+      setTimeout(() => {
+        this.connectPublic().catch(error => {
+          console.error('Échec de reconnexion du WebSocket public:', error);
+        });
+      }, delay);
+    } else {
+      console.error('❌ Nombre maximum de tentatives de reconnexion du WebSocket public atteint');
+      
+      setTimeout(() => {
+        console.log('🔄 Réinitialisation des tentatives de reconnexion du WebSocket public');
+        this.publicReconnectAttempts = 0;
+        this.connectPublic().catch(error => {
+          console.error('Échec de reconnexion du WebSocket public après réinitialisation:', error);
+        });
+      }, 60000);
+    }
+  }
+  
+  reconnectPrivate(scheduled = false) {
+    if (scheduled) {
+      this.privateReconnectAttempts = 0;
+    }
+    
+    if (this.privateReconnectAttempts < this.maxReconnectAttempts) {
+      this.privateReconnectAttempts++;
+      const delay = Math.min(1000 * Math.pow(2, this.privateReconnectAttempts), 30000);
+      
+      console.log(`🔄 Tentative de reconnexion du WebSocket privé ${this.privateReconnectAttempts}/${this.maxReconnectAttempts} dans ${delay}ms`);
+      
+      setTimeout(() => {
+        this.connectPrivate().catch(error => {
+          console.error('Échec de reconnexion du WebSocket privé:', error);
+        });
+      }, delay);
+    } else {
+      console.error('❌ Nombre maximum de tentatives de reconnexion du WebSocket privé atteint');
+      
+      setTimeout(() => {
+        console.log('🔄 Réinitialisation des tentatives de reconnexion du WebSocket privé');
+        this.privateReconnectAttempts = 0;
+        this.connectPrivate().catch(error => {
+          console.error('Échec de reconnexion du WebSocket privé après réinitialisation:', error);
+        });
+      }, 60000);
+    }
   }
 }
 
