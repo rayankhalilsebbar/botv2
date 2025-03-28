@@ -175,7 +175,7 @@ class WebSocketClient extends EventEmitter {
           // Traiter les mises à jour d'ordres
           if (data.arg && data.arg.channel === 'orders' && data.data && data.data.length > 0) {
             data.data.forEach(order => {
-              const { clientOid, status, price, size, side } = order;
+              const { clientOid, status, price, newSize, side } = order;
               
               if (!clientOid) {
                 console.log('📋 Ordre sans clientOid reçu:', order);
@@ -186,12 +186,14 @@ class WebSocketClient extends EventEmitter {
               
               // Traiter différents types de statuts
               if (status === 'filled') {
+                 // Toujours utiliser newSize pour les ordres exécutés
+                 const size = parseFloat(newSize);
                 // Déterminer s'il s'agit d'un achat ou d'une vente
                 if (clientOid.startsWith('buy_')) {
                   this.emit('buy_order_filled', {
                     clientOid,
                     price: parseFloat(price),
-                    size: parseFloat(size)
+                    size: size
                   });
                 } else if (clientOid.startsWith('sell_')) {
                   this.emit('sell_order_filled', {
