@@ -27,6 +27,10 @@ class WebSocketClient extends EventEmitter {
     this.publicPingInterval = null;
     this.privatePingInterval = null;
 
+    // Timeouts pour les pongs
+    this.publicPongTimeout = null;
+    this.privatePongTimeout = null;
+
     // Paramètres de reconnexion
     this.publicReconnectAttempts = 0;
     this.privateReconnectAttempts = 0;
@@ -77,12 +81,20 @@ class WebSocketClient extends EventEmitter {
       
       this.publicWs.on('message', (message) => {
         try {
+          const messageStr = message.toString();
+          
           // Traiter le ping/pong en texte brut
-          if (message.toString() === 'pong') {
+          if (messageStr === 'pong') {
+            console.log('✅ Pong reçu sur WebSocket public');
+            // Nettoyer le timeout de pong
+            if (this.publicPongTimeout) {
+              clearTimeout(this.publicPongTimeout);
+              this.publicPongTimeout = null;
+            }
             return;
           }
           
-          const data = JSON.parse(message.toString());
+          const data = JSON.parse(messageStr);
           
           // Traiter les mises à jour de prix
           if (data.arg && data.arg.channel === 'ticker' && data.data && data.data.length > 0) {
@@ -153,12 +165,20 @@ class WebSocketClient extends EventEmitter {
       
       this.privateWs.on('message', (message) => {
         try {
+          const messageStr = message.toString();
+          
           // Traiter le ping/pong en texte brut
-          if (message.toString() === 'pong') {
+          if (messageStr === 'pong') {
+            console.log('✅ Pong reçu sur WebSocket privé');
+            // Nettoyer le timeout de pong
+            if (this.privatePongTimeout) {
+              clearTimeout(this.privatePongTimeout);
+              this.privatePongTimeout = null;
+            }
             return;
           }
           
-          const data = JSON.parse(message.toString());
+          const data = JSON.parse(messageStr);
           
           // Traiter l'événement de login
           if (data.event === 'login') {
@@ -326,17 +346,53 @@ class WebSocketClient extends EventEmitter {
   }
   
   setupPublicPingPong() {
+    // Nettoyer l'intervalle existant si présent
+    if (this.publicPingInterval) {
+      clearInterval(this.publicPingInterval);
+    }
+
+    // Configurer l'intervalle de ping
     this.publicPingInterval = setInterval(() => {
-      if (this.publicConnected) {
+      if (this.publicWs && this.publicConnected) {
+        console.log('📤 Ping envoyé sur WebSocket public');
         this.publicWs.send('ping');
+
+        // Nettoyer le timeout précédent s'il existe
+        if (this.publicPongTimeout) {
+          clearTimeout(this.publicPongTimeout);
+        }
+
+        // Configurer le timeout pour le pong
+        this.publicPongTimeout = setTimeout(() => {
+          console.warn('⚠️ Timeout du pong sur WebSocket public');
+          this.publicWs.close();
+        }, 5000);
       }
     }, this.config.pingInterval);
   }
   
   setupPrivatePingPong() {
+    // Nettoyer l'intervalle existant si présent
+    if (this.privatePingInterval) {
+      clearInterval(this.privatePingInterval);
+    }
+
+    // Configurer l'intervalle de ping
     this.privatePingInterval = setInterval(() => {
-      if (this.privateConnected) {
+      if (this.privateWs && this.privateConnected) {
+        console.log('📤 Ping envoyé sur WebSocket privé');
         this.privateWs.send('ping');
+
+        // Nettoyer le timeout précédent s'il existe
+        if (this.privatePongTimeout) {
+          clearTimeout(this.privatePongTimeout);
+        }
+
+        // Configurer le timeout pour le pong
+        this.privatePongTimeout = setTimeout(() => {
+          console.warn('⚠️ Timeout du pong sur WebSocket privé');
+          this.privateWs.close();
+        }, 5000);
       }
     }, this.config.pingInterval);
   }
@@ -410,49 +466,17 @@ class WebSocketClient extends EventEmitter {
   disconnect() {
     console.log('🛑 Déconnexion des WebSockets');
     
-    // Arrêter les reconnexions programmées
-    if (this.publicScheduledReconnect) {
-      clearTimeout(this.publicScheduledReconnect);
-      this.publicScheduledReconnect = null;
-    }
-    
-    if (this.privateScheduledReconnect) {
-      clearTimeout(this.privateScheduledReconnect);
-      this.privateScheduledReconnect = null;
-    }
-    
     // Arrêter le traitement par lots
     if (this.batchInterval) {
       clearInterval(this.batchInterval);
       this.batchInterval = null;
     }
     
-    // Arrêter les pings
-    if (this.publicPingInterval) {
-      clearInterval(this.publicPingInterval);
-      this.publicPingInterval = null;
-    }
+    // Utiliser les nouvelles méthodes de déconnexion
+    this.disconnectPublic();
+    this.disconnectPrivate();
     
-    if (this.privatePingInterval) {
-      clearInterval(this.privatePingInterval);
-      this.privatePingInterval = null;
-    }
-    
-    // Fermer les connexions
-    if (this.publicWs) {
-      this.publicWs.close();
-      this.publicWs = null;
-    }
-    
-    if (this.privateWs) {
-      this.privateWs.close();
-      this.privateWs = null;
-    }
-    
-    this.publicConnected = false;
-    this.privateConnected = false;
     this.isAuthenticated = false;
-    
     console.log('👋 WebSockets déconnectés proprement');
   }
   
@@ -525,6 +549,72 @@ class WebSocketClient extends EventEmitter {
           console.error('Échec de reconnexion du WebSocket privé après réinitialisation:', error);
         });
       }, 60000);
+    }
+  }
+
+  disconnectPublic() {
+    if (this.publicWs) {
+      // Supprimer tous les listeners
+      this.publicWs.removeAllListeners('message');
+      this.publicWs.removeAllListeners('open');
+      this.publicWs.removeAllListeners('close');
+      this.publicWs.removeAllListeners('error');
+      
+      // Fermer la connexion
+      this.publicWs.close();
+      this.publicWs = null;
+      this.publicConnected = false;
+    }
+
+    // Nettoyer les intervalles
+    if (this.publicPingInterval) {
+      clearInterval(this.publicPingInterval);
+      this.publicPingInterval = null;
+    }
+
+    // Nettoyer le timeout de pong
+    if (this.publicPongTimeout) {
+      clearTimeout(this.publicPongTimeout);
+      this.publicPongTimeout = null;
+    }
+
+    // Nettoyer les timeouts de reconnexion
+    if (this.publicScheduledReconnect) {
+      clearTimeout(this.publicScheduledReconnect);
+      this.publicScheduledReconnect = null;
+    }
+  }
+
+  disconnectPrivate() {
+    if (this.privateWs) {
+      // Supprimer tous les listeners
+      this.privateWs.removeAllListeners('message');
+      this.privateWs.removeAllListeners('open');
+      this.privateWs.removeAllListeners('close');
+      this.privateWs.removeAllListeners('error');
+      
+      // Fermer la connexion
+      this.privateWs.close();
+      this.privateWs = null;
+      this.privateConnected = false;
+    }
+
+    // Nettoyer les intervalles
+    if (this.privatePingInterval) {
+      clearInterval(this.privatePingInterval);
+      this.privatePingInterval = null;
+    }
+
+    // Nettoyer le timeout de pong
+    if (this.privatePongTimeout) {
+      clearTimeout(this.privatePongTimeout);
+      this.privatePongTimeout = null;
+    }
+
+    // Nettoyer les timeouts de reconnexion
+    if (this.privateScheduledReconnect) {
+      clearTimeout(this.privateScheduledReconnect);
+      this.privateScheduledReconnect = null;
     }
   }
 }
