@@ -16,9 +16,9 @@ module.exports = {
   
   // Paramètres d'authentification
   apiKeys: {
-    apiKey: process.env.BITGET_API_KEY || 'METTRE API KEY',
-    secretKey: process.env.BITGET_SECRET_KEY || 'METTRE SECRET KEY',
-    passphrase: process.env.BITGET_PASSPHRASE || 'METTRE PASSPHRASE'
+    apiKey: process.env.BITGET_API_KEY || 'METTRE LA CLE API ICI',
+    secretKey: process.env.BITGET_SECRET_KEY || 'METTRE LA CLE SECRET ICI',
+    passphrase: process.env.BITGET_PASSPHRASE || 'METTRE LE PASSPHRASE ICI'
   },
   
   // Paramètres pour les ordres en masse
@@ -34,5 +34,5 @@ module.exports = {
   },
   
   // Paramètres WebSocket
-  pingInterval: 30000,         // Intervalle de ping/pong en ms
+  pingInterval: 29000,         // Intervalle de ping/pong en ms
 }; 
