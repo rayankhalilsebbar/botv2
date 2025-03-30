@@ -166,41 +166,65 @@ class GridStrategy {
           distanceFromCurrent: Math.abs(currentPrice - price)
         }))
         .sort((a, b) => a.distanceFromCurrent - b.distanceFromCurrent);
-  
-      // Identifier les ordres déplaçables
-      const movableOrders = activeBuyOrders
-        .map(order => ({
-          order,
-          distanceFromCurrent: Math.abs(currentPrice - order.price)
-        }))
-        .sort((a, b) => b.distanceFromCurrent - a.distanceFromCurrent);
-  
-      // Combler les trous
-      const holeOrdersToCancel = [];
-      const newHoleOrdersToPlace = [];
-      
-      for (const hole of holes) {
-        if (movableOrders.length === 0) break;
+
+      // Vérifier si nous avons atteint la limite d'ordres
+      const activeSellOrders = this.orderService.getActiveSellOrders();
+      const totalActiveOrders = activeBuyOrders.length + activeSellOrders.length;
+      const canAddWithoutCancelling = totalActiveOrders < this.config.maxOrders;
+
+      if (canAddWithoutCancelling && holes.length > 0) {
+        // Si on n'a pas atteint la limite, simplement ajouter des ordres pour les trous
+        // Limiter le nombre de nouveaux ordres à placer
+        const holesToFill = holes.slice(0, this.config.maxOrders - totalActiveOrders);
         
-        const farOrder = movableOrders[0];
-        if (farOrder.distanceFromCurrent > hole.distanceFromCurrent) {
-          holeOrdersToCancel.push(farOrder.order.clientOid);
-          newHoleOrdersToPlace.push(hole.price);
-          movableOrders.shift();
+        if (holesToFill.length > 0) {
+          console.log(`📈 Ajout de ${holesToFill.length} nouveaux niveaux pour combler les trous`);
+          
+          const newOrdersData = holesToFill.map(hole => ({
+            price: hole.price,
+            size: this.orderService.calculateOrderSize(hole.price)
+          }));
+          
+          this.orderService.placeBulkOrders(newOrdersData, 'buy');
         }
-      }
-  
-      // Appliquer les changements pour les trous
-      if (holeOrdersToCancel.length > 0) {
-        console.log(`🔄 Optimisation: Déplacement de ${holeOrdersToCancel.length} ordres pour combler les trous`);
-        this.orderService.cancelBulkOrders(holeOrdersToCancel);
+      } else if (holes.length > 0) {
+        // Si on a atteint la limite ou s'il n'y a pas de place disponible, déplacer des ordres
+
+        // Identifier les ordres déplaçables
+        const movableOrders = activeBuyOrders
+          .map(order => ({
+            order,
+            distanceFromCurrent: Math.abs(currentPrice - order.price)
+          }))
+          .sort((a, b) => b.distanceFromCurrent - a.distanceFromCurrent);
+
+        // Combler les trous en déplaçant des ordres
+        const holeOrdersToCancel = [];
+        const newHoleOrdersToPlace = [];
         
-        const newOrdersData = newHoleOrdersToPlace.map(price => ({
-          price,
-          size: this.orderService.calculateOrderSize(price)
-        }));
-        
-        this.orderService.placeBulkOrders(newOrdersData, 'buy');
+        for (const hole of holes) {
+          if (movableOrders.length === 0) break;
+          
+          const farOrder = movableOrders[0];
+          if (farOrder.distanceFromCurrent > hole.distanceFromCurrent) {
+            holeOrdersToCancel.push(farOrder.order.clientOid);
+            newHoleOrdersToPlace.push(hole.price);
+            movableOrders.shift();
+          }
+        }
+
+        // Appliquer les changements pour les trous
+        if (holeOrdersToCancel.length > 0) {
+          console.log(`🔄 Optimisation: Déplacement de ${holeOrdersToCancel.length} ordres pour combler les trous`);
+          this.orderService.cancelBulkOrders(holeOrdersToCancel);
+          
+          const newOrdersData = newHoleOrdersToPlace.map(price => ({
+            price,
+            size: this.orderService.calculateOrderSize(price)
+          }));
+          
+          this.orderService.placeBulkOrders(newOrdersData, 'buy');
+        }
       }
   
       // Mettre à jour les timestamps
