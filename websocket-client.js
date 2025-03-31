@@ -37,6 +37,10 @@ class WebSocketClient extends EventEmitter {
     this.maxReconnectAttempts = 5;
     this.publicScheduledReconnect = null;
     this.privateScheduledReconnect = null;
+    
+    // Indicateurs pour les reconnexions en cours
+    this.publicReconnectionInProgress = false;
+    this.privateReconnectionInProgress = false;
   }
   
   async connect() {
@@ -61,11 +65,13 @@ class WebSocketClient extends EventEmitter {
       console.log(`🔌 Connexion au WebSocket public: ${this.config.wsEndpoints.public}`);
       
       this.publicWs = new WebSocket(this.config.wsEndpoints.public);
+      console.log(`📊 État de la connexion publique: ws=${this.publicWs ? 'existe' : 'null'}, connecté=${this.publicConnected}`);
       
       this.publicWs.on('open', () => {
         console.log('✅ WebSocket public connecté');
         this.publicConnected = true;
         this.publicReconnectAttempts = 0;  // Réinitialiser les tentatives
+        this.publicReconnectionInProgress = false;
         
         // S'abonner au canal ticker
         this.subscribeToPriceUpdates();
@@ -134,8 +140,10 @@ class WebSocketClient extends EventEmitter {
           this.publicScheduledReconnect = null;
         }
         
-        // Tenter de se reconnecter
-        this.reconnectPublic();
+        // Tenter de se reconnecter seulement si la déconnexion n'est pas due à une reconnexion programmée
+        if (!this.publicReconnectionInProgress) {
+          this.reconnectPublic();
+        }
       });
     });
   }
@@ -145,11 +153,13 @@ class WebSocketClient extends EventEmitter {
       console.log(`🔌 Connexion au WebSocket privé: ${this.config.wsEndpoints.private}`);
       
       this.privateWs = new WebSocket(this.config.wsEndpoints.private);
+      console.log(`📊 État de la connexion privée: ws=${this.privateWs ? 'existe' : 'null'}, connecté=${this.privateConnected}, authentifié=${this.isAuthenticated}`);
       
       this.privateWs.on('open', () => {
         console.log('✅ WebSocket privé connecté');
         this.privateConnected = true;
         this.privateReconnectAttempts = 0;  // Réinitialiser les tentatives
+        this.privateReconnectionInProgress = false;
         
         // S'authentifier
         this.authenticate();
@@ -262,8 +272,10 @@ class WebSocketClient extends EventEmitter {
           this.privateScheduledReconnect = null;
         }
         
-        // Tenter de se reconnecter
-        this.reconnectPrivate();
+        // Tenter de se reconnecter seulement si la déconnexion n'est pas due à une reconnexion programmée
+        if (!this.privateReconnectionInProgress) {
+          this.reconnectPrivate();
+        }
       });
     });
   }
@@ -324,6 +336,28 @@ class WebSocketClient extends EventEmitter {
     this.publicWs.send(JSON.stringify(subscribeMessage));
   }
   
+  unsubscribeFromPriceUpdates() {
+    if (!this.publicConnected) return;
+    
+    try {
+      const unsubscribeMessage = {
+        op: 'unsubscribe',
+        args: [
+          {
+            instType: 'SPOT',
+            channel: 'ticker',
+            instId: this.config.symbol
+          }
+        ]
+      };
+      
+      console.log(`📤 Désabonnement du canal ticker pour ${this.config.symbol}`);
+      this.publicWs.send(JSON.stringify(unsubscribeMessage));
+    } catch (error) {
+      console.error(`❌ Erreur lors du désabonnement aux mises à jour de prix:`, error.message);
+    }
+  }
+  
   subscribeToOrderUpdates() {
     if (!this.privateConnected || !this.isAuthenticated) {
       console.error('❌ WebSocket privé non connecté ou non authentifié, impossible de s\'abonner aux ordres');
@@ -343,6 +377,28 @@ class WebSocketClient extends EventEmitter {
     
     console.log(`📤 Abonnement au canal des ordres pour ${this.config.symbol}`);
     this.privateWs.send(JSON.stringify(subscribeMessage));
+  }
+  
+  unsubscribeFromOrderUpdates() {
+    if (!this.privateConnected || !this.isAuthenticated) return;
+    
+    try {
+      const unsubscribeMessage = {
+        op: 'unsubscribe',
+        args: [
+          {
+            instType: 'SPOT',
+            channel: 'orders',
+            instId: this.config.symbol
+          }
+        ]
+      };
+      
+      console.log(`📤 Désabonnement du canal des ordres pour ${this.config.symbol}`);
+      this.privateWs.send(JSON.stringify(unsubscribeMessage));
+    } catch (error) {
+      console.error(`❌ Erreur lors du désabonnement aux mises à jour d'ordres:`, error.message);
+    }
   }
   
   setupPublicPingPong() {
@@ -481,6 +537,10 @@ class WebSocketClient extends EventEmitter {
   }
   
   schedulePublicReconnect() {
+    if (this.publicScheduledReconnect) {
+      clearTimeout(this.publicScheduledReconnect);
+    }
+    
     this.publicScheduledReconnect = setTimeout(() => {
       console.log('⏰ Reconnexion programmée du WebSocket public déclenchée');
       this.reconnectPublic(true);
@@ -488,6 +548,10 @@ class WebSocketClient extends EventEmitter {
   }
   
   schedulePrivateReconnect() {
+    if (this.privateScheduledReconnect) {
+      clearTimeout(this.privateScheduledReconnect);
+    }
+    
     this.privateScheduledReconnect = setTimeout(() => {
       console.log('⏰ Reconnexion programmée du WebSocket privé déclenchée');
       this.reconnectPrivate(true);
@@ -495,10 +559,28 @@ class WebSocketClient extends EventEmitter {
   }
   
   reconnectPublic(scheduled = false) {
+    // Si c'est une reconnexion programmée, déconnecter proprement d'abord
     if (scheduled) {
+      console.log(`🔄 Début de la reconnexion programmée du WebSocket public`);
+      this.publicReconnectionInProgress = true;
       this.publicReconnectAttempts = 0;
+      
+      // Déconnecter proprement avant de reconnecter
+      this.disconnectPublic();
+      
+      // Ajouter un délai pour assurer que la déconnexion est complète
+      setTimeout(() => {
+        console.log(`🔄 Tentative de reconnexion programmée du WebSocket public`);
+        this.connectPublic().catch(error => {
+          console.error('❌ Échec de reconnexion programmée du WebSocket public:', error);
+          this.publicReconnectionInProgress = false;
+        });
+      }, 3000); // Délai de 3 secondes
+      
+      return; // Sortir pour éviter le code de reconnexion standard
     }
     
+    // Reconnexion standard (non programmée)
     if (this.publicReconnectAttempts < this.maxReconnectAttempts) {
       this.publicReconnectAttempts++;
       const delay = Math.min(1000 * Math.pow(2, this.publicReconnectAttempts), 30000);
@@ -507,7 +589,7 @@ class WebSocketClient extends EventEmitter {
       
       setTimeout(() => {
         this.connectPublic().catch(error => {
-          console.error('Échec de reconnexion du WebSocket public:', error);
+          console.error('❌ Échec de reconnexion du WebSocket public:', error);
         });
       }, delay);
     } else {
@@ -517,17 +599,35 @@ class WebSocketClient extends EventEmitter {
         console.log('🔄 Réinitialisation des tentatives de reconnexion du WebSocket public');
         this.publicReconnectAttempts = 0;
         this.connectPublic().catch(error => {
-          console.error('Échec de reconnexion du WebSocket public après réinitialisation:', error);
+          console.error('❌ Échec de reconnexion du WebSocket public après réinitialisation:', error);
         });
       }, 60000);
     }
   }
   
   reconnectPrivate(scheduled = false) {
+    // Si c'est une reconnexion programmée, déconnecter proprement d'abord
     if (scheduled) {
+      console.log(`🔄 Début de la reconnexion programmée du WebSocket privé`);
+      this.privateReconnectionInProgress = true;
       this.privateReconnectAttempts = 0;
+      
+      // Déconnecter proprement avant de reconnecter
+      this.disconnectPrivate();
+      
+      // Ajouter un délai pour assurer que la déconnexion est complète
+      setTimeout(() => {
+        console.log(`🔄 Tentative de reconnexion programmée du WebSocket privé`);
+        this.connectPrivate().catch(error => {
+          console.error('❌ Échec de reconnexion programmée du WebSocket privé:', error);
+          this.privateReconnectionInProgress = false;
+        });
+      }, 3000); // Délai de 3 secondes
+      
+      return; // Sortir pour éviter le code de reconnexion standard
     }
     
+    // Reconnexion standard (non programmée)
     if (this.privateReconnectAttempts < this.maxReconnectAttempts) {
       this.privateReconnectAttempts++;
       const delay = Math.min(1000 * Math.pow(2, this.privateReconnectAttempts), 30000);
@@ -536,7 +636,7 @@ class WebSocketClient extends EventEmitter {
       
       setTimeout(() => {
         this.connectPrivate().catch(error => {
-          console.error('Échec de reconnexion du WebSocket privé:', error);
+          console.error('❌ Échec de reconnexion du WebSocket privé:', error);
         });
       }, delay);
     } else {
@@ -546,76 +646,123 @@ class WebSocketClient extends EventEmitter {
         console.log('🔄 Réinitialisation des tentatives de reconnexion du WebSocket privé');
         this.privateReconnectAttempts = 0;
         this.connectPrivate().catch(error => {
-          console.error('Échec de reconnexion du WebSocket privé après réinitialisation:', error);
+          console.error('❌ Échec de reconnexion du WebSocket privé après réinitialisation:', error);
         });
       }, 60000);
     }
   }
 
   disconnectPublic() {
+    console.log(`🔌 Déconnexion du WebSocket public initiée`);
+    
+    // Nettoyer les timeouts et intervalles
+    if (this.publicPingInterval) {
+      console.log('🧹 Nettoyage de l\'intervalle de ping public');
+      clearInterval(this.publicPingInterval);
+      this.publicPingInterval = null;
+    }
+    
+    if (this.publicPongTimeout) {
+      console.log('🧹 Nettoyage du timeout de pong public');
+      clearTimeout(this.publicPongTimeout);
+      this.publicPongTimeout = null;
+    }
+    
+    if (this.publicScheduledReconnect) {
+      console.log('🧹 Nettoyage de la reconnexion programmée publique');
+      clearTimeout(this.publicScheduledReconnect);
+      this.publicScheduledReconnect = null;
+    }
+    
+    // Se désabonner avant de fermer
+    if (this.publicWs && this.publicConnected) {
+      try {
+        this.unsubscribeFromPriceUpdates();
+      } catch (error) {
+        console.error('❌ Erreur lors du désabonnement:', error.message);
+      }
+    }
+    
     if (this.publicWs) {
+      console.log('👋 Fermeture de la connexion WebSocket publique');
+      
       // Supprimer tous les listeners
       this.publicWs.removeAllListeners('message');
       this.publicWs.removeAllListeners('open');
       this.publicWs.removeAllListeners('close');
       this.publicWs.removeAllListeners('error');
       
-      // Fermer la connexion
-      this.publicWs.close();
+      // Fermer la connexion avec un code normal
+      try {
+        this.publicWs.close(1000, 'Fermeture normale');
+      } catch (error) {
+        console.error('❌ Erreur lors de la fermeture du WebSocket public:', error.message);
+      }
+      
       this.publicWs = null;
-      this.publicConnected = false;
     }
-
-    // Nettoyer les intervalles
-    if (this.publicPingInterval) {
-      clearInterval(this.publicPingInterval);
-      this.publicPingInterval = null;
-    }
-
-    // Nettoyer le timeout de pong
-    if (this.publicPongTimeout) {
-      clearTimeout(this.publicPongTimeout);
-      this.publicPongTimeout = null;
-    }
-
-    // Nettoyer les timeouts de reconnexion
-    if (this.publicScheduledReconnect) {
-      clearTimeout(this.publicScheduledReconnect);
-      this.publicScheduledReconnect = null;
-    }
+    
+    // Réinitialiser les états
+    this.publicConnected = false;
+    
+    console.log('✅ Déconnexion du WebSocket public terminée');
   }
 
   disconnectPrivate() {
+    console.log(`🔌 Déconnexion du WebSocket privé initiée`);
+    
+    // Nettoyer les timeouts et intervalles
+    if (this.privatePingInterval) {
+      console.log('🧹 Nettoyage de l\'intervalle de ping privé');
+      clearInterval(this.privatePingInterval);
+      this.privatePingInterval = null;
+    }
+    
+    if (this.privatePongTimeout) {
+      console.log('🧹 Nettoyage du timeout de pong privé');
+      clearTimeout(this.privatePongTimeout);
+      this.privatePongTimeout = null;
+    }
+    
+    if (this.privateScheduledReconnect) {
+      console.log('🧹 Nettoyage de la reconnexion programmée privée');
+      clearTimeout(this.privateScheduledReconnect);
+      this.privateScheduledReconnect = null;
+    }
+    
+    // Se désabonner avant de fermer
+    if (this.privateWs && this.privateConnected && this.isAuthenticated) {
+      try {
+        this.unsubscribeFromOrderUpdates();
+      } catch (error) {
+        console.error('❌ Erreur lors du désabonnement:', error.message);
+      }
+    }
+    
     if (this.privateWs) {
+      console.log('👋 Fermeture de la connexion WebSocket privée');
+      
       // Supprimer tous les listeners
       this.privateWs.removeAllListeners('message');
       this.privateWs.removeAllListeners('open');
       this.privateWs.removeAllListeners('close');
       this.privateWs.removeAllListeners('error');
       
-      // Fermer la connexion
-      this.privateWs.close();
+      // Fermer la connexion avec un code normal
+      try {
+        this.privateWs.close(1000, 'Fermeture normale');
+      } catch (error) {
+        console.error('❌ Erreur lors de la fermeture du WebSocket privé:', error.message);
+      }
+      
       this.privateWs = null;
-      this.privateConnected = false;
     }
-
-    // Nettoyer les intervalles
-    if (this.privatePingInterval) {
-      clearInterval(this.privatePingInterval);
-      this.privatePingInterval = null;
-    }
-
-    // Nettoyer le timeout de pong
-    if (this.privatePongTimeout) {
-      clearTimeout(this.privatePongTimeout);
-      this.privatePongTimeout = null;
-    }
-
-    // Nettoyer les timeouts de reconnexion
-    if (this.privateScheduledReconnect) {
-      clearTimeout(this.privateScheduledReconnect);
-      this.privateScheduledReconnect = null;
-    }
+    
+    // Réinitialiser les états
+    this.privateConnected = false;
+    this.isAuthenticated = false;
+    
+    console.log('✅ Déconnexion du WebSocket privé terminée');
   }
 }
 
