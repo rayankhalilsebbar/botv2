@@ -8,24 +8,120 @@ class OrderService {
     this.activeBuyOrders = new Map(); // clientOid -> order details
     this.activeSellOrders = new Map(); // clientOid -> order details
     
+    // Nouveau: Registre des ordres traités avec leurs timestamps
+    this.processedOrders = new Map(); // clientOid -> { status, timestamp }
+    
+    // Nouveau: Intervalle pour nettoyer les ordres traités anciens
+    this.cleanupInterval = setInterval(() => this.cleanupProcessedOrders(), 3600000); // Nettoyage toutes les heures
+    
     // Configurer les écouteurs d'événements
     this.setupEventListeners();
+  }
+  
+  // Nouveau: Méthode pour nettoyer les ordres traités trop anciens
+  cleanupProcessedOrders() {
+    const now = Date.now();
+    const expirationTime = 24 * 60 * 60 * 1000; // 24 heures en millisecondes
+    let deletedCount = 0;
+    
+    for (const [clientOid, data] of this.processedOrders.entries()) {
+      if (now - data.timestamp > expirationTime) {
+        this.processedOrders.delete(clientOid);
+        deletedCount++;
+      }
+    }
+    
+    if (deletedCount > 0) {
+      console.log(`🧹 Nettoyage des ordres traités: ${deletedCount} ordres supprimés, ${this.processedOrders.size} ordres en mémoire`);
+    }
+  }
+  
+  // Nouveau: Vérifier si un ordre a déjà été traité avec un statut spécifique
+  isOrderProcessed(clientOid, status) {
+    const processedData = this.processedOrders.get(clientOid);
+    return processedData && processedData.status === status;
+  }
+  
+  // Nouveau: Marquer un ordre comme traité
+  markOrderAsProcessed(clientOid, status) {
+    this.processedOrders.set(clientOid, {
+      status,
+      timestamp: Date.now()
+    });
   }
   
   setupEventListeners() {
     // Écouteur pour les ordres d'achat remplis
     this.wsClient.on('buy_order_filled', (data) => {
-      this.handleBuyOrderFilled(data);
+      // Vérifier si cet ordre a déjà été traité comme "filled"
+      if (!this.isOrderProcessed(data.clientOid, 'filled')) {
+        this.handleBuyOrderFilled(data);
+        // Marquer l'ordre comme traité après le traitement
+        this.markOrderAsProcessed(data.clientOid, 'filled');
+      } else {
+        console.log(`⚠️ Ordre d'achat ${data.clientOid} déjà traité, ignoré`);
+      }
     });
     
     // Écouteur pour les ordres de vente remplis
     this.wsClient.on('sell_order_filled', (data) => {
-      this.handleSellOrderFilled(data);
+      // Vérifier si cet ordre a déjà été traité comme "filled"
+      if (!this.isOrderProcessed(data.clientOid, 'filled')) {
+        this.handleSellOrderFilled(data);
+        // Marquer l'ordre comme traité après le traitement
+        this.markOrderAsProcessed(data.clientOid, 'filled');
+      } else {
+        console.log(`⚠️ Ordre de vente ${data.clientOid} déjà traité, ignoré`);
+      }
     });
     
     // Écouteur pour les ordres annulés
     this.wsClient.on('order_cancelled', (data) => {
-      this.handleOrderCancelled(data);
+      // Vérifier si cet ordre a déjà été traité comme "cancelled"
+      if (!this.isOrderProcessed(data.clientOid, 'cancelled')) {
+        this.handleOrderCancelled(data);
+        // Marquer l'ordre comme traité après le traitement
+        this.markOrderAsProcessed(data.clientOid, 'cancelled');
+      } else {
+        console.log(`⚠️ Annulation d'ordre ${data.clientOid} déjà traitée, ignorée`);
+      }
+    });
+    
+    // Nouveau: Ajouter un écouteur pour l'événement générique "order_update"
+    this.wsClient.on('order_update', (order) => {
+      const { clientOid, status } = order;
+      
+      // Ne traiter que si nous n'avons pas déjà traité cet ordre avec ce statut
+      if (status === 'filled' && !this.isOrderProcessed(clientOid, 'filled')) {
+        // Si c'est un ordre d'achat
+        if (clientOid.startsWith('buy_')) {
+          this.handleBuyOrderFilled({
+            clientOid,
+            price: parseFloat(order.price),
+            size: parseFloat(order.newSize || order.size)
+          });
+          // Marquer l'ordre comme traité
+          this.markOrderAsProcessed(clientOid, 'filled');
+        } 
+        // Si c'est un ordre de vente
+        else if (clientOid.startsWith('sell_')) {
+          this.handleSellOrderFilled({
+            clientOid,
+            price: parseFloat(order.price),
+            size: parseFloat(order.newSize || order.size)
+          });
+          // Marquer l'ordre comme traité
+          this.markOrderAsProcessed(clientOid, 'filled');
+        }
+      } else if ((status === 'cancelled' || status === 'canceled') && !this.isOrderProcessed(clientOid, 'cancelled')) {
+        this.handleOrderCancelled({
+          clientOid,
+          price: parseFloat(order.price),
+          side: order.side
+        });
+        // Marquer l'ordre comme traité
+        this.markOrderAsProcessed(clientOid, 'cancelled');
+      }
     });
   }
   
