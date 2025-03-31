@@ -2,8 +2,8 @@
 module.exports = {
   // Paramètres de trading
   symbol: 'BTCUSDT',
-  maxOrders: 100,           // Nombre maximum d'ordres actifs
-  priceStep: 100,            // Écart entre les paliers en USD
+  maxOrders: 10,           // Nombre maximum d'ordres actifs
+  priceStep: 10,            // Écart entre les paliers en USD
   orderAmountUSDT: 2,      // Montant fixe en USDT pour chaque ordre
   pricePrecision: 2,        // Nombre de décimales pour les prix
   sizePrecision: 6,         // Nombre de décimales pour la taille des ordres
@@ -16,9 +16,9 @@ module.exports = {
   
   // Paramètres d'authentification
   apiKeys: {
-    apiKey: process.env.BITGET_API_KEY || 'METTRE LA CLE API ICI',
-    secretKey: process.env.BITGET_SECRET_KEY || 'METTRE LA CLE SECRET ICI',
-    passphrase: process.env.BITGET_PASSPHRASE || 'METTRE LE PASSPHRASE ICI'
+    apiKey: process.env.BITGET_API_KEY || 'METTRE LA CLE API  ',
+    secretKey: process.env.BITGET_SECRET_KEY || 'METTRE LA CLE SECRET',
+    passphrase: process.env.BITGET_PASSPHRASE || 'METTRE LE PASSPHRASE'
   },
   
   // Paramètres pour les ordres en masse
@@ -35,4 +35,5 @@ module.exports = {
   
   // Paramètres WebSocket
   pingInterval: 29000,         // Intervalle de ping/pong en ms
+  reconnectInterval: 85800000, // Intervalle de reconnexion programmée (23h50m)
 }; 
